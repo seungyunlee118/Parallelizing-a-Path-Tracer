@@ -63,6 +63,13 @@ them.
 report) in your submission.
 
 ## Phase 2: Parallelize your Path Tracer
+Create a parallel implementation of your path tracer using `std::threads`.
+I recommend starting with launching a single thread to generate your image,
+using the main thread to update the interface. This will allow you to observe
+image generation interactively. Then work on parallelizing image rendering
+using multiple threads and experiment with different scheduling methods.
+
+### Requirements
 - [ ] Implement the image evaluation function in an independent thread so that
 you can observe image formation interactively.
 - [ ] Implement averaging and acquire multiple samples per pixel to perform
