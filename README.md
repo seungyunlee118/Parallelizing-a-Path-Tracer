@@ -53,4 +53,24 @@ There are a few things that we'll need your path tracer to accomplish:
 by a position $p$ and a radius $r$. You can hard-code them or load them from
 some sort of simple text file.
 - [ ] The spheres will need some material properties including
-```reflectivity```, 
+`reflectivity` and `emmissivity`. If you have experience with C++ it may be
+helpful to encode these properties and intersection methods into a class.
+- [ ] Profile the code extensively to optimize the single-threaded performance.
+Build a flame graph for intermediate profiling steps and include these in
+a brief report describing the bottlenecks you encountered and how you fixed
+them.
+- [ ] Create a `zip` file from your repository and include it (and your
+report) in your submission.
+
+## Phase 2: Parallelize your Path Tracer
+- [ ] Implement the image evaluation function in an independent thread so that
+you can observe image formation interactively.
+- [ ] Implement averaging and acquire multiple samples per pixel to perform
+more accurate Monte-Carlo sampling. **Note:** this will require representing
+the image using an intermediate floating-point step, since an `unsigned char`
+data type is insufficient for averaging.
+- [ ] Launch multiple `std::threads` to parallelize rendering. Experiment with
+at least 3 different allocation techniques and profile them. Include your
+results in a report with flame graphs.
+- [ ] Create a `zip` file from your repository and include it (and your report)
+in your submission.
