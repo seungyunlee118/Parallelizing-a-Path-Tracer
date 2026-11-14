@@ -5,6 +5,11 @@
 #include <numbers>
 #include <random>
 #include <iostream>
+#include <chrono>
+#include <atomic>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
 
 // Project includes
 #include <tira/graphics/camera.h>
@@ -168,50 +173,40 @@ glm::vec3 TracePath(glm::vec3 o, glm::vec3 v)
   return c;
 }
 
-// Progressive rendering: running sum of all path samples for each pixel
+// Progressive rendering: running sum of all path samples for each pixel.
+// These are only touched by the render thread.
 std::vector<glm::vec3> accum;
 size_t num_samples = 0;        // number of samples added to every pixel so far
 glm::vec3 last_position(0.0f); // camera state that the current sum belongs to
 float last_fov = 0.0f;
 
-void InitializePathTracer()
-{
+// Timing: total time spent rendering passes since the last report
+double pass_ms_total = 0.0;
 
-  // allocate the image buffer and clear it (set it to zero)
-  if (s_exp > 0)
-  {
-    image_buffer.resize(pow(2, s_exp) * pow(2, s_exp) * 3);
-    std::fill(image_buffer.begin(), image_buffer.end(), 0);
-  }
-}
+// The main (UI) thread owns `camera` and changes it from the sliders. The render
+// thread never reads `camera` directly: the main thread copies it into
+// shared_camera, and the render thread takes its own copy at the start of each
+// pass. camera_mutex makes sure only one of them touches shared_camera at a time.
+std::mutex camera_mutex;
+tira::graphics::Camera shared_camera;
 
-void UpdatePathTracer()
+std::thread render_thread;              // the thread that renders the image
+std::atomic<bool> stop_rendering{false}; // set by the main thread to stop it
+
+// Adds one sample to every pixel using the camera cam, then updates image_buffer
+void RenderPass(const tira::graphics::Camera &cam, size_t s)
 {
-  size_t s = std::pow(2, s_exp);
   float dx = 1.0f / s;
-
-  // start over when the camera moves or the image size changes
-  if (camera.Position() != last_position || camera.FieldOfView() != last_fov ||
-      accum.size() != s * s)
-  {
-    accum.assign(s * s, glm::vec3(0.0f));
-    num_samples = 0;
-    last_position = camera.Position();
-    last_fov = camera.FieldOfView();
-  }
-  num_samples++;
-  if (num_samples % 100 == 0)
-    std::cout << num_samples << " samples per pixel" << std::endl;
 
   for (size_t yi = 0; yi < s; yi++)
   {
     for (size_t xi = 0; xi < s; xi++)
     {
       // ray from the camera through a random point inside this pixel
-      glm::vec3 o = camera.Position();
+      glm::vec3 o = cam.Position();
       float px = -0.5f + (xi + Random01()) * dx;
       float py = 0.5f - (yi + Random01()) * dx;
-      glm::vec3 v = camera.Ray(px, py);
+      glm::vec3 v = cam.Ray(px, py);
 
       // add one more path sample, then average all samples so far
       size_t p = yi * s + xi;
@@ -233,4 +228,95 @@ void UpdatePathTracer()
       image_buffer[idx + 2] = std::clamp(color.b, 0.0f, 1.0f) * 255;
     }
   }
+}
+
+// Body of the render thread: keeps adding passes until it is asked to stop
+void RenderLoop()
+{
+  size_t s = std::pow(2, s_exp);
+
+  while (!stop_rendering)
+  {
+    // take a private copy of the latest camera for this whole pass
+    tira::graphics::Camera cam;
+    {
+      std::lock_guard<std::mutex> lock(camera_mutex);
+      cam = shared_camera;
+    }
+
+    // start over when the camera moves (or on the very first pass)
+    if (cam.Position() != last_position || cam.FieldOfView() != last_fov ||
+        accum.size() != s * s)
+    {
+      accum.assign(s * s, glm::vec3(0.0f));
+      num_samples = 0;
+      last_position = cam.Position();
+      last_fov = cam.FieldOfView();
+      pass_ms_total = 0.0;
+    }
+    num_samples++;
+
+    auto t_start = std::chrono::steady_clock::now(); // start the stopwatch
+    RenderPass(cam, s);
+    auto t_end = std::chrono::steady_clock::now();
+    pass_ms_total += std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+    // every 100 passes, report the average time per pass
+    if (num_samples % 100 == 0)
+    {
+      double avg_ms = pass_ms_total / 100.0;
+      double msamples_per_s = (s * s) / (avg_ms * 1000.0); // million samples per second
+      std::cout << num_samples << " spp | " << avg_ms << " ms/pass | "
+                << msamples_per_s << " M samples/s" << std::endl;
+      pass_ms_total = 0.0;
+    }
+  }
+}
+
+// Asks the render thread to stop and waits until it has finished
+void StopRenderThread()
+{
+  if (render_thread.joinable())
+  {
+    stop_rendering = true; // the render thread checks this between passes
+    render_thread.join();  // wait for it to finish its current pass
+  }
+}
+
+void InitializePathTracer()
+{
+  // the render thread writes to image_buffer, so stop it before resizing
+  StopRenderThread();
+
+  // allocate the image buffer and clear it (set it to zero)
+  if (s_exp > 0)
+  {
+    image_buffer.resize(pow(2, s_exp) * pow(2, s_exp) * 3);
+    std::fill(image_buffer.begin(), image_buffer.end(), 0);
+  }
+
+  // stop the render thread when the program exits (a std::thread that is still
+  // running when it is destroyed would crash the program)
+  static bool exit_handler_registered = false;
+  if (!exit_handler_registered)
+  {
+    std::atexit(StopRenderThread);
+    exit_handler_registered = true;
+  }
+
+  // give the render thread the current camera, then start it
+  {
+    std::lock_guard<std::mutex> lock(camera_mutex);
+    shared_camera = camera;
+  }
+  stop_rendering = false;
+  render_thread = std::thread(RenderLoop);
+}
+
+// Called by the main (UI) thread every frame: passes the latest camera to the
+// render thread. The rendering itself now happens in RenderLoop.
+void UpdatePathTracer()
+{
+  std::lock_guard<std::mutex> lock(camera_mutex);
+  shared_camera = camera;
 }
